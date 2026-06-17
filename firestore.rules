@@ -1,0 +1,138 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Default Deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Helpers ---
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Maqam Project Validation ---
+    function isValidProjectCreate(data) {
+      return data.keys().hasAll(['meta', 'bars', 'analysis']) &&
+             data.keys().size() == 3 &&
+             data.meta is map &&
+             data.meta.keys().hasAll(['id', 'title', 'ownerId', 'bpm', 'createdAt', 'updatedAt', 'version', 'beatOffsetMs', 'beatsPerBar', 'lastSyncedAt', 'syncStatus']) &&
+             data.meta.id is string && data.meta.id.size() <= 128 &&
+             data.meta.title is string && data.meta.title.size() <= 200 &&
+             data.meta.ownerId == request.auth.uid &&
+             data.meta.bpm is number && data.meta.bpm >= 0 && data.meta.bpm <= 500 &&
+             data.meta.createdAt is string &&
+             data.meta.updatedAt is string &&
+             data.meta.version is number &&
+             data.bars is list && data.bars.size() <= 200 &&
+             data.analysis is map;
+    }
+
+    function isValidProjectUpdate(data) {
+      // General structure check
+      return data.meta is map &&
+             data.meta.ownerId == request.auth.uid &&
+             data.meta.updatedAt is string &&
+             data.bars is list &&
+             data.analysis is map;
+    }
+
+    match /maqamProjects/{projectId} {
+      allow get: if isSignedIn() && existing().meta.ownerId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.meta.ownerId == request.auth.uid;
+
+      allow create: if isSignedIn() && isValidId(projectId) && isValidProjectCreate(incoming()) &&
+                      incoming().meta.id == projectId &&
+                      incoming().meta.ownerId == request.auth.uid;
+
+      allow update: if isSignedIn() && isValidId(projectId) && isValidProjectUpdate(incoming()) &&
+                      existing().meta.ownerId == request.auth.uid &&
+                      incoming().meta.ownerId == existing().meta.ownerId &&
+                      incoming().meta.id == existing().meta.id &&
+                      incoming().meta.createdAt == existing().meta.createdAt &&
+                      incoming().diff(existing()).affectedKeys().hasOnly(['meta', 'bars', 'analysis', 'firestoreUpdatedAt']);
+
+      allow delete: if isSignedIn() && existing().meta.ownerId == request.auth.uid;
+    }
+
+    // --- State Vault Validation ---
+    function isValidStateRecordCreate(data) {
+      return data.keys().hasAll(['name', 'payload', 'userId', 'version', 'updatedAtClient', 'payloadHash', 'payloadSize', 'deviceId', 'deleted', 'tombstone']) &&
+             data.name is string && data.name.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.payload is string && data.payload.size() <= 1572864 && // 1.5MB limit
+             data.version is number &&
+             data.updatedAtClient is number;
+    }
+
+    match /users/{userId}/stateVault/{namespace}/documents/{name} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) && isValidId(namespace) && isValidId(name) &&
+                      isValidStateRecordCreate(incoming()) &&
+                      incoming().userId == userId &&
+                      incoming().name == name;
+
+      allow update: if isOwner(userId) && isValidId(namespace) && isValidId(name) &&
+                      incoming().userId == userId &&
+                      incoming().name == existing().name &&
+                      incoming().diff(existing()).affectedKeys().hasAny(['payload', 'updatedAtClient', 'payloadHash', 'payloadSize', 'updatedAtServer', 'deleted', 'tombstone', 'kind', 'isCompressed']);
+
+      allow delete: if isOwner(userId);
+
+      match /snapshots/{snapshotId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(snapshotId) &&
+                        incoming().userId == userId;
+        allow update, delete: if false; // Snapshots are immutable
+      }
+    }
+
+    // --- CloudSyncEngine Store Validation ---
+    function isValidCloudRecordCreate(data) {
+      return data.keys().hasAll(['payload', 'isCompressed', 'checksum', 'vectorClock', 'schemaVersion', 'updatedAtClient', 'namespace']) &&
+             data.payload is string &&
+             data.isCompressed is bool &&
+             data.checksum is string &&
+             data.vectorClock is map &&
+             data.schemaVersion is number &&
+             data.updatedAtClient is number &&
+             data.namespace is string;
+    }
+
+    match /users/{userId}/stores/{storeId} {
+      allow get: if isOwner(userId);
+      allow list: if isOwner(userId);
+
+      allow create: if isOwner(userId) && isValidId(storeId) &&
+                      isValidCloudRecordCreate(incoming());
+
+      allow update: if isOwner(userId) && isValidId(storeId) &&
+                      incoming().diff(existing()).affectedKeys().hasOnly(['payload', 'isCompressed', 'checksum', 'vectorClock', 'schemaVersion', 'updatedAtClient', 'updatedAtServer']);
+
+      allow delete: if isOwner(userId);
+    }
+
+    // --- Connectivity Test ---
+    match /test/connection {
+       allow get: if isSignedIn();
+    }
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "entities": {
+    "MaqamProject": {
+      "title": "Maqam Project",
+      "description": "A full rap blueprint project with bars and analysis.",
+      "type": "object",
+      "properties": {
+        "meta": {
+          "type": "object",
+          "properties": {
+            "id": { "type": "string", "description": "Unique project ID" },
+            "title": { "type": "string", "description": "Project title" },
+            "ownerId": { "type": "string", "description": "UID of the project owner" },
+            "bpm": { "type": "number", "description": "Beats per minute" },
+            "beatOffsetMs": { "type": "number" },
+            "beatsPerBar": { "type": "number" },
+            "createdAt": { "type": "string", "format": "date-time" },
+            "updatedAt": { "type": "string", "format": "date-time" },
+            "syncStatus": { "type": "string", "enum": ["synced", "dirty", "local-only", "syncing", "error"] },
+            "version": { "type": "number" }
+          },
+          "required": ["id", "title", "ownerId", "bpm", "createdAt", "updatedAt", "version"]
+        },
+        "bars": {
+          "type": "array",
+          "description": "List of bars in the project",
+          "items": { "type": "object" }
+        },
+        "analysis": {
+          "type": "object",
+          "description": "Deep analysis data bundle"
+        }
+      },
+      "required": ["meta", "bars", "analysis"]
+    },
+    "StateRecord": {
+      "title": "State Record",
+      "description": "Generic record used for zustand persistence sync.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "payload": { "type": "string" },
+        "updatedAtClient": { "type": "number" },
+        "updatedAtServer": { "type": "object" },
+        "payloadSize": { "type": "number" },
+        "payloadHash": { "type": "string" },
+        "deviceId": { "type": "string" },
+        "userId": { "type": "string" },
+        "deleted": { "type": "boolean" },
+        "tombstone": { "type": "boolean" },
+        "isCompressed": { "type": "boolean" },
+        "kind": { "type": "string" },
+        "version": { "type": "number" }
+      },
+      "required": ["name", "payload", "updatedAtClient", "userId", "version"]
+    },
+    "CloudRecord": {
+      "title": "Cloud Record",
+      "description": "Generic record used by CloudSyncEngine v4.",
+      "type": "object",
+      "properties": {
+        "payload": { "type": "string" },
+        "isCompressed": { "type": "boolean" },
+        "checksum": { "type": "string" },
+        "vectorClock": { "type": "object" },
+        "schemaVersion": { "type": "number" },
+        "updatedAtClient": { "type": "number" },
+        "updatedAtServer": { "type": "object" },
+        "namespace": { "type": "string" }
+      },
+      "required": [
+        "payload",
+        "isCompressed",
+        "checksum",
+        "schemaVersion",
+        "updatedAtClient",
+        "namespace"
+      ]
+    }
+  },
+  "firestore": {
+    "/maqamProjects/{projectId}": {
+      "schema": "MaqamProject",
+      "description": "User rap projects."
+    },
+    "/users/{userId}/stateVault/{namespace}/documents/{name}": {
+      "schema": "StateRecord",
+      "description": "Persistent app state synced to cloud."
+    },
+    "/users/{userId}/stateVault/{namespace}/documents/{name}/snapshots/{snapshotId}": {
+      "schema": "StateRecord",
+      "description": "History of app state snapshots."
+    },
+    "/users/{userId}/stores/{storeId}": {
+      "schema": "CloudRecord",
+      "description": "CloudSyncEngine v4 sync stores."
+    },
+    "/test/connection": {
+      "schema": "object",
+      "description": "Dummy document for connectivity testing."
+    }
+  }
+}

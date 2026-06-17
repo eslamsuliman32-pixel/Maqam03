@@ -1,0 +1,248 @@
+@import url('https://fonts.googleapis.com/css2?family=Alexandria:wght@400;500;700;800;900&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Alexandria', sans-serif;
+  --font-arabic: 'Cairo', 'Noto Kufi Arabic', system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+
+  /* الخلفيات */
+  --color-bg-base: #0A0A0F;
+  --color-bg-primary: #0C0C18;
+  --color-bg-surface: #12121A;
+  --color-bg-elevated: #1A1A2E;
+  --color-bg-overlay: #1F1F3A;
+  --color-bg-hover: #252540;
+
+  /* الذهبي */
+  --color-gold-50: #FFF9E6;
+  --color-gold-100: #FFEDB3;
+  --color-gold-200: #FFD966;
+  --color-gold-300: #FCD34D;
+  --color-gold-400: #F59E0B;
+  --color-gold-500: #B8860B;
+  --color-gold-600: #9A7200;
+
+  /* الجودة */
+  --color-quality-perfect: #00D68F;
+  --color-quality-high: #27AE60;
+  --color-quality-medium: #F39C12;
+  --color-quality-low: #E74C3C;
+
+  /* أوزان الصوت */
+  --color-weight-light: #4A9EBF;
+  --color-weight-medium: #D4A017;
+  --color-weight-heavy: #E07820;
+  --color-weight-super: #C0392B;
+
+  /* فئات الحروف */
+  --color-phoneme-explosive: #FF6B6B;
+  --color-phoneme-resonant: #4ECDC4;
+  --color-phoneme-fricative: #A8E063;
+  --color-phoneme-pharyngeal: #DDA0DD;
+  --color-phoneme-vowel: #87CEEB;
+
+  /* الشبكة الإيقاعية */
+  --color-grid-heavy: #D4A017;
+  --color-grid-medium: #7A6830;
+  --color-grid-light: #2A2840;
+  --color-grid-occupied-ok: rgba(39, 174, 96, 0.35);
+  --color-grid-occupied-warn: rgba(243, 156, 18, 0.35);
+  --color-grid-occupied-err: rgba(231, 76, 60, 0.35);
+
+  /* الفلو */
+  --color-pocket: #4A9EBF;
+  --color-overflow: #E07820;
+  --color-mixed: #9B59B6;
+
+  /* النصوص */
+  --color-text-primary: #F2EEE8;
+  --color-text-secondary: #9A94AB;
+  --color-text-muted: #4A4868;
+  --color-text-accent: #D4A017;
+
+  /* الحدود */
+  --color-border-subtle: rgba(255, 255, 255, 0.06);
+  --color-border-default: rgba(255, 255, 255, 0.10);
+  --color-border-gold: rgba(212, 160, 23, 0.30);
+  --color-border-active: rgba(212, 160, 23, 0.70);
+
+  --animate-spin-slow: spin 8s linear infinite;
+
+  --grid-template-columns-16: repeat(16, minmax(0, 1fr));
+
+  /* Neural Matchmaking V2 */
+  --color-neural-sapphire: #3B82F6;
+  --color-neural-amethyst: #8B5CF6;
+  --color-neural-rose: #F472B6;
+  --color-neural-gold: #FBBF24;
+  --color-neural-emerald: #10B981;
+  --color-neural-crimson: #EF4444;
+
+  --background-image-gradients-royalAurora: linear-gradient(135deg, #2B1B50 0%, #3B82F6 35%, #8B5CF6 70%, #F472B6 100%);
+  --background-image-gradients-thermalSpectrum: linear-gradient(90deg, #3B82F6 0%, #10B981 25%, #FBBF24 60%, #EF4444 100%);
+}
+
+@layer base {
+  html {
+    direction: rtl;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    /* Strict scaling and antialiasing per sovereign guidelines */
+    text-size-adjust: 100%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html::-webkit-scrollbar {
+    display: none;
+  }
+
+  body {
+    @apply bg-bg-base text-text-primary font-arabic antialiased overflow-x-hidden;
+    /* Typography adjustments for dark theme readability & density */
+    letter-spacing: -0.015em;
+    line-height: 1.65;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+
+  body::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Structural Headings Override */
+  h1, h2, h3, h4, h5, h6 {
+    @apply font-black tracking-tight;
+    line-height: 1.25;
+  }
+
+  h1 { @apply text-4xl; }
+  h2 { @apply text-3xl; }
+  h3 { @apply text-2xl; }
+
+  /* Muted metadata readability */
+  p, span {
+    @apply font-normal;
+  }
+}
+
+/* Hide scrollbars for all elements but keep functionality */
+* {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+*::-webkit-scrollbar {
+  display: none;
+}
+
+.glass-panel {
+  @apply bg-bg-surface/40 backdrop-blur-xl border border-white/5 shadow-2xl;
+}
+
+.glass-panel-gold {
+  @apply bg-gold-400/5 backdrop-blur-xl border border-gold-400/20 shadow-[0_0_30px_rgba(212,160,23,0.05)];
+}
+
+.neo-shadow {
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
+}
+
+.rhythm-cell {
+  @apply w-7 h-7 rounded-sm flex items-center justify-center font-mono text-[9px] font-semibold border border-transparent transition-all duration-150 ease-in-out;
+}
+
+.rhythm-cell--beat-1,
+.rhythm-cell--beat-3 {
+  @apply h-9 bg-gradient-to-b from-gold-400 to-gold-600 border-gold-300 shadow-[0_0_8px_rgba(212,160,23,0.3)];
+}
+
+.rhythm-cell--beat-2,
+.rhythm-cell--beat-4 {
+  @apply h-[30px] bg-gold-400/15 border-gold-400/25;
+}
+
+.rhythm-cell--light {
+  @apply h-[22px] bg-bg-elevated border-border-subtle;
+}
+
+.rhythm-cell--ok {
+  @apply bg-grid-occupied-ok border-quality-high text-quality-high;
+}
+
+.rhythm-cell--warn {
+  @apply bg-grid-occupied-warn border-quality-medium animate-[subtle-pulse_2s_ease_infinite];
+}
+
+.rhythm-cell--err {
+  @apply bg-grid-occupied-err border-quality-low animate-[urgent-pulse_0.8s_ease_infinite];
+}
+
+@keyframes subtle-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(243, 156, 18, 0.2); }
+  50% { box-shadow: 0 0 0 4px rgba(243, 156, 18, 0); }
+}
+
+@keyframes urgent-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(231, 76, 60, 0); }
+}
+
+.glow-accent {
+  box-shadow: 0 0 15px rgba(212, 160, 23, 0.3);
+}
+
+.glow-text {
+  text-shadow: 0 0 10px rgba(212, 160, 23, 0.5);
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  display: block;
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  @apply bg-gold-400/20 rounded-full hover:bg-gold-400/40;
+}
+
+.hide-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+/* --- Engineering Workshop Elite Styles --- */
+.workshop-card {
+  @apply bg-bg-surface/40 backdrop-blur-2xl border border-white/5 rounded-3xl overflow-hidden shadow-2xl transition-all duration-500;
+  background: linear-gradient(135deg, rgba(26, 26, 46, 0.6) 0%, rgba(22, 33, 62, 0.4) 100%);
+}
+
+.workshop-stage-active {
+  @apply border-gold-400 bg-gold-400/5 shadow-[0_0_30px_rgba(212,160,23,0.1)];
+}
+
+.workshop-gradient-text {
+  background: linear-gradient(45deg, #00d4ff, #0099ff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.workshop-progress-fill {
+  background: linear-gradient(90deg, #00d4ff, #0099ff, #D4A017);
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.4);
+}
+
+@keyframes matrix-fade {
+  0% { opacity: 0.1; }
+  50% { opacity: 0.3; }
+  100% { opacity: 0.1; }
+}
+
+.matrix-overlay {
+  animation: matrix-fade 5s ease-in-out infinite;
+}

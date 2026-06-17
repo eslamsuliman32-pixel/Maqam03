@@ -1,0 +1,7 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic-settings
+pydub
+praatio>=6.0.0
+pydantic

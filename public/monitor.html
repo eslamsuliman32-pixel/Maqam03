@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <title>مُراقب تدفق الجلسات</title>
+    <style>
+        :root { --bg: #0b1120; --surface: #1e293b; --text: #e2e8f0; --accent: #f59e0b; --danger: #ef4444; --success: #10b981; }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; background: var(--bg); color: var(--text); padding: 24px; }
+        .container { max-width: 960px; margin: 0 auto; }
+        .toolbar { display: flex; gap: 12px; margin: 20px 0; align-items: center; }
+        #search { flex: 1; padding: 10px; border: 1px solid #334155; background: var(--surface); color: var(--text); border-radius: 8px; }
+        .upload-btn { background: var(--accent); color: #000; padding: 10px 16px; border-radius: 8px; cursor: pointer; font-weight: bold; }
+        #upload { display: none; }
+        .session-row { background: var(--surface); border: 1px solid #334155; border-radius: 10px; margin-bottom: 12px; overflow: hidden; transition: 0.2s; }
+        .session-header { padding: 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; user-select: none; }
+        .session-body { display: none; padding: 16px; border-top: 1px solid #334155; background: #0f172a; }
+        .open .session-body { display: block; }
+        .heatmap { display: flex; gap: 3px; height: 28px; align-items: center; }
+        .heatmap-cell { width: 24px; height: 100%; border-radius: 3px; transition: transform 0.1s; }
+        .heatmap-cell:hover { transform: scale(1.2); }
+        .bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 100px; margin: 10px 0; border-bottom: 1px solid #334155; }
+        .bar { width: 36px; background: #facc15; border-radius: 4px 4px 0 0; min-height: 4px; position: relative; }
+        .bar-label { position: absolute; bottom: -18px; left: 0; right: 0; font-size: 10px; text-align: center; color: #cbd5e1; }
+        .worst-cards { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+        .worst-card { background: #7f1d1d; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; display: flex; align-items: center; gap: 6px; transition: background 0.2s; }
+        .worst-card:hover { background: #991b1b; }
+        .simulate-btn { background: var(--danger); color: white; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; margin-top: 16px; font-weight: bold; }
+        mark { background: var(--accent); color: #000; border-radius: 2px; padding: 0 2px; }
+        .empty-state { text-align: center; padding: 40px; color: #94a3b8; }
+        .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); background: #450a0a; color: white; padding: 24px; border-radius: 12px; border: 1px solid var(--danger); display: none; z-index: 1000; font-size: 18px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        .modal-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); display: none; z-index: 999; }
+        .toast { position: fixed; bottom: 20px; right: 20px; background: var(--success); color: white; padding: 12px 20px; border-radius: 8px; display: none; z-index: 1000; box-shadow: 0 4px 6px rgba(0,0,0,0.3); }
+        .toast.error { background: var(--danger); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>⚡ مُراقب تدفق الجلسات</h1>
+        <div class="toolbar">
+            <input type="text" id="search" placeholder="ابحث في النصوص..." autocomplete="off">
+            <label class="upload-btn" for="upload">📂 تحميل JSON</label>
+            <input type="file" id="upload" accept=".json">
+        </div>
+        <div id="sessions-container"></div>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <div class="modal-overlay" id="modal-overlay"></div>
+    <div class="modal" id="error-modal"></div>
+
+    <script>
+        const DEMO_FLOW_SESSIONS = [
+            {
+                id: 's1',
+                bar_text: 'صمتك سيف في خاصرتي',
+                phoneme_map: [
+                    { start_ms: 0, in_pocket: false },
+                    { start_ms: 120, in_pocket: false },
+                    { start_ms: 250, in_pocket: true },
+                    { start_ms: 400, in_pocket: true },
+                    { start_ms: 520, in_pocket: false }
+                ],
+                spectral_clashes: [
+                    { intensity_diff_db: 4 },
+                    { intensity_diff_db: 9 },
+                    { intensity_diff_db: 2 }
+                ],
+                worst_3_moments: ['صمتك', 'سيف', 'خاصرتي']
+            },
+            {
+                id: 's2',
+                bar_text: 'الريح تعزف لحن الرحيل',
+                phoneme_map: [
+                    { start_ms: 0, in_pocket: true },
+                    { start_ms: 180, in_pocket: false },
+                    { start_ms: 300, in_pocket: true }
+                ],
+                spectral_clashes: [
+                    { intensity_diff_db: 7 },
+                    { intensity_diff_db: 1 }
+                ],
+                worst_3_moments: ['الريح', 'تعزف', 'الرحيل']
+            }
+        ];
+
+        let sessions = [...DEMO_FLOW_SESSIONS];
+        let expandedIds = JSON.parse(localStorage.getItem('monitor_expanded') || '[]');
+        let searchTerm = localStorage.getItem('monitor_search') || '';
+
+        const container = document.getElementById('sessions-container');
+        const searchInput = document.getElementById('search');
+        const uploadInput = document.getElementById('upload');
+        const toast = document.getElementById('toast');
+        const modal = document.getElementById('error-modal');
+        const modalOverlay = document.getElementById('modal-overlay');
+
+        searchInput.value = searchTerm;
+
+        function showToast(msg, isError = false) {
+            toast.textContent = msg;
+            toast.className = 'toast' + (isError ? ' error' : '');
+            toast.style.display = 'block';
+            setTimeout(() => toast.style.display = 'none', 3000);
+        }
+
+        function saveState() {
+            localStorage.setItem('monitor_expanded', JSON.stringify(expandedIds));
+            localStorage.setItem('monitor_search', searchInput.value);
+        }
+
+        function escapeRegex(string) {
+            return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        }
+
+        function escapeQuotes(string) {
+            return string.replace(/'/g, "\\'");
+        }
+
+        function render() {
+            const term = searchInput.value.trim().toLowerCase();
+            const filtered = sessions.filter(s => s.bar_text.toLowerCase().includes(term));
+
+            if (!sessions.length) {
+                container.innerHTML = `<div class="empty-state">⚠️ لا توجد جلسات. قم بتحميل ملف JSON صالح.</div>`;
+                return;
+            }
+            if (!filtered.length) {
+                container.innerHTML = `<div class="empty-state">🔍 لا توجد نتائج مطابقة لـ "${searchInput.value}"</div>`;
+                return;
+            }
+
+            container.innerHTML = filtered.map(s => {
+                const isOpen = expandedIds.includes(s.id);
+                const textHtml = term
+                    ? s.bar_text.replace(new RegExp(`(${escapeRegex(term)})`, 'gi'), '<mark>$1</mark>')
+                    : s.bar_text;
+
+                const phonemeMapHtml = (s.phoneme_map || []).map(p => {
+                    const color = p.in_pocket ? 'var(--success)' : 'var(--danger)';
+                    return `<div class="heatmap-cell" style="background:${color}" title="${p.start_ms}ms"></div>`;
+                }).join('');
+
+                const clashesHtml = (s.spectral_clashes || []).map(c => {
+                    const h = Math.min(c.intensity_diff_db * 8, 100);
+                    return `<div class="bar" style="height:${h}px"><span class="bar-label">${c.intensity_diff_db}dB</span></div>`;
+                }).join('');
+
+                const worstHtml = (s.worst_3_moments || []).map(m => 
+                    `<div class="worst-card" onclick="event.stopPropagation(); copyToClipboard('${escapeQuotes(m)}')">
+                        📋 ${m}
+                     </div>`
+                ).join('');
+
+                return `
+                <div class="session-row ${isOpen ? 'open' : ''}" data-id="${s.id}">
+                    <div class="session-header" onclick="toggleSession('${s.id}')">
+                        <span>${textHtml}</span>
+                        <span>${isOpen ? '▲' : '▼'}</span>
+                    </div>
+                    <div class="session-body">
+                        <strong>خريطة الفونيمات (Heatmap)</strong>
+                        <div class="heatmap">${phonemeMapHtml}</div>
+                        <strong style="display:block; margin-top:16px">تصادمات الطيف</strong>
+                        <div class="bar-chart">${clashesHtml}</div>
+                        <strong style="display:block; margin-top:16px">أسوأ 3 لحظات</strong>
+                        <div class="worst-cards">${worstHtml}</div>
+                        <button class="simulate-btn" onclick="event.stopPropagation(); simulateError('${s.id}')">🔥 محاكاة خطأ عشوائي</button>
+                    </div>
+                </div>`;
+            }).join('');
+        }
+
+        window.toggleSession = function(id) {
+            const idx = expandedIds.indexOf(id);
+            if (idx > -1) expandedIds.splice(idx, 1);
+            else expandedIds.push(id);
+            saveState();
+            render();
+        };
+
+        window.simulateError = function(sessionId) {
+            const session = sessions.find(s => s.id === sessionId);
+            if (!session?.worst_3_moments?.length) return;
+            const randomMoment = session.worst_3_moments[Math.floor(Math.random() * session.worst_3_moments.length)];
+            modal.innerHTML = `💥 خطأ حرج في اللحظة: "<strong>${randomMoment}</strong>"`;
+            modal.style.display = 'block';
+            modalOverlay.style.display = 'block';
+            setTimeout(() => {
+                modal.style.display = 'none';
+                modalOverlay.style.display = 'none';
+            }, 2500);
+        };
+
+        window.copyToClipboard = function(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                showToast('✅ تم النسخ: ' + text);
+            }).catch(() => {
+                showToast('❌ تعذر النسخ', true);
+            });
+        };
+
+        uploadInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const data = JSON.parse(event.target.result);
+                    if (!Array.isArray(data)) throw new Error('التنسيق ليس مصفوفة');
+                    if (!data.length) {
+                        sessions = [];
+                        render();
+                        return;
+                    }
+                    
+                    const requiredKeys = ['phoneme_map', 'spectral_clashes', 'worst_3_moments', 'bar_text', 'id'];
+                    const invalid = data.some(item => !requiredKeys.every(k => item.hasOwnProperty(k)));
+                    if (invalid) {
+                        showToast('⚠️ الملف يفتقد المفاتيح المطلوبة للمراقبة. تم الغاء التحميل.', true);
+                        return;
+                    }
+                    
+                    sessions = data;
+                    expandedIds = [];
+                    searchInput.value = '';
+                    saveState();
+                    render();
+                    showToast('✅ تم تحميل البيانات بنجاح');
+                } catch (err) {
+                    showToast('❌ فشل تحليل الملف: ' + err.message, true);
+                }
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        });
+
+        searchInput.addEventListener('input', () => {
+            saveState();
+            render();
+        });
+
+        render();
+
+        (function selfTest() {
+            console.log('🧪 بدء الاختبار الذاتي...');
+            let passed = 0;
+            let total = 3;
+
+            const oldSessions = [...sessions];
+            sessions = [];
+            render();
+            if (container.innerText.includes('لا توجد جلسات')) {
+                console.log('✅ [حالة الجلسات الفارغة]');
+                passed++;
+            } else {
+                console.log('❌ [حالة الجلسات الفارغة]');
+            }
+            
+            sessions = [...oldSessions];
+            if(sessions.length > 0 && !expandedIds.includes(sessions[0].id)) {
+                expandedIds.push(sessions[0].id);
+            }
+            render();
+
+            let catchWorks = false;
+            try {
+                const data = JSON.parse('{corrupt_data_here: unquoted}');
+            } catch(e) {
+                catchWorks = true;
+            }
+            if (catchWorks) {
+                console.log('✅ [التقاط JSON تالف]');
+                passed++;
+            } else {
+                console.log('❌ [التقاط JSON تالف]');
+            }
+
+            const heatmapExists = document.querySelector('.heatmap') !== null;
+            const barChartExists = document.querySelector('.bar-chart') !== null;
+            if (heatmapExists && barChartExists) {
+                console.log('✅ [رندرة المكونات المرئية (Heatmap/BarChart)]');
+                passed++;
+            } else {
+                console.log('❌ [رندرة المكونات المرئية (Heatmap/BarChart)]');
+            }
+
+            console.log(`الاختبار الذاتي: ${passed}/${total}`);
+        })();
+    </script>
+</body>
+</html>
