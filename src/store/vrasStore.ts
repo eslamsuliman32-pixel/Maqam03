@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { subscribeWithSelector } from "zustand/middleware";
+import { analyzeAudioFile } from "../services/audioAnalysisEngine";
+import { beatBlueprintToVrasAnalysis } from "../services/vrasBeatAdapter";
 
 // ════════════════════════════════════════════════════
 //                    CORE TYPES
@@ -556,22 +558,20 @@ export const useVRASStore = create<VRASState>()(
 
         set({ isAnalyzing: true, analysisProgress: 0 });
 
-        // محاكاة مراحل التحليل التدريجي
-        const stages = [
-          { progress: 15, delay: 400, msg: "فحص BPM والإيقاع..." },
-          { progress: 35, delay: 600, msg: "رسم خريطة الطاقة..." },
-          { progress: 55, delay: 500, msg: "تحديد أقسام البيت..." },
-          { progress: 75, delay: 700, msg: "تحليل المقامات..." },
-          { progress: 90, delay: 400, msg: "بناء الشبكة الإيقاعية..." },
-          { progress: 100, delay: 300, msg: "اكتمل التحليل ✓" },
-        ];
-
-        for (const stage of stages) {
-          await new Promise((r) => setTimeout(r, stage.delay));
-          set({ analysisProgress: stage.progress });
+        let analysis: BeatAnalysis;
+        try {
+          // ── التحليل الحقيقي عبر محرك الصوت ──
+          const blueprint = await analyzeAudioFile(audioFile, (progress) => {
+            set({ analysisProgress: Math.round(progress) });
+          });
+          analysis = beatBlueprintToVrasAnalysis(blueprint);
+        } catch (err) {
+          // احتياطي: في حال فشل فك التشفير نعود للتحليل المحاكى
+          console.error("[VRAS] فشل التحليل الحقيقي، استخدام الاحتياطي:", err);
+          analysis = generateMockBeatAnalysis(audioFile.name);
+          set({ analysisProgress: 100 });
         }
 
-        const analysis = generateMockBeatAnalysis(audioFile.name);
         const slots = buildBarSlots(analysis, barDatabase);
         const advices = generateAdvices(slots);
 
