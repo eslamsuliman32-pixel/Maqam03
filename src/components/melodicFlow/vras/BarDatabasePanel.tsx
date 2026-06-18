@@ -3,6 +3,7 @@
 import React, { useMemo, useState, useRef, memo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useVRASStore, TextBar, EmotionTag } from "../../../store/vrasStore";
+import { useRepositoryStore } from "../../../store/repositoryStore";
 
 const EMOTION_ICONS: Record<EmotionTag, string> = {
   aggressive: "🔥", sad: "🌙", triumphant: "👑",
@@ -13,6 +14,9 @@ export const BarDatabasePanel: React.FC = () => {
   const {
     barDatabase, activeEmotionFilter, searchQuery, canvas, actions,
   } = useVRASStore();
+  const repoAddBar = useRepositoryStore((s) => s.addBar);
+  const repoAddBatch = useRepositoryStore((s) => s.addBatch);
+  const repoBarsCount = useRepositoryStore((s) => s.bars.length);
   const [addMode, setAddMode] = useState(false);
   const [newBarText, setNewBarText] = useState("");
   const fileRef = useRef<HTMLInputElement>(null);
@@ -32,26 +36,22 @@ export const BarDatabasePanel: React.FC = () => {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
-      const text = ev.target?.result as string;
-      actions.importBarsFromText(text);
+      const raw = ev.target?.result as string;
+      // كل سطر = بار واحد، استيراد دفعي للمستودع الرئيسي
+      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      repoAddBatch(
+        lines.map((text) => ({ text, dialect: "fusha" as const, tags: ["imported"] }))
+      );
     };
     reader.readAsText(file);
+    e.target.value = "";
   };
 
   const handleAddBar = () => {
     if (!newBarText.trim()) return;
-    actions.addBar({
-      text: newBarText.trim(),
-      syllableCount: 0,
-      rhymeEnd: newBarText.trim().slice(-3),
-      rhymeScheme: "free",
-      emotion: "neutral",
-      energy: "medium",
-      hasInternalRhyme: false,
-      explosiveLetterRatio: 0,
-      wordCount: newBarText.trim().split(/\s+/).length,
-      tags: ["manual"],
-    });
+    const text = newBarText.trim();
+    // إضافة للمستودع الرئيسي — المزامنة التلقائية ستُحدّث VRAS
+    repoAddBar({ text, dialect: "fusha", tags: ["manual", "vras"] });
     setNewBarText("");
     setAddMode(false);
   };
@@ -65,7 +65,12 @@ export const BarDatabasePanel: React.FC = () => {
             <span className="text-base">📝</span>
             <div>
               <h3 className="text-xs font-black text-white/80">مستودع البارات</h3>
-              <p className="text-[9px] text-white/30 font-mono">{barDatabase.length} بار محمّل</p>
+              <p className="text-[9px] font-mono flex items-center gap-1">
+                <span className="text-white/30">{barDatabase.length} بار</span>
+                {repoBarsCount > 0 && (
+                  <span className="text-emerald-400/70">· مزامن ✓</span>
+                )}
+              </p>
             </div>
           </div>
           <div className="flex gap-1">
