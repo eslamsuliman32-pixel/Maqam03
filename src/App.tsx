@@ -62,6 +62,7 @@ import { DeleteConfirmationModal } from "./components/DeleteConfirmationModal";
 import { ProjectsManager } from "./components/ProjectsManager";
 import { RuntimeMonitor } from "./components/RuntimeMonitor";
 import MaqamWorkshopPage from "./pages/MaqamWorkshopPage";
+import { VRASWorkspace } from "./components/melodicFlow/vras/VRASWorkspace";
 import { BarRepositoryDisplay } from "./components/BarRepositoryDisplay";
 import MaqamEngine from "./MaqamEngine";
 import { FlowMethodologyHub } from "./components/FlowMethodologyHub";
@@ -77,6 +78,7 @@ import { forceCloudSync } from "./services/firebaseSync";
 type Tab =
   | "dashboard"
   | "beat"
+  | "visual_rhythm"
   | "repository"
   | "projects"
   | "engineering_workshop"
@@ -935,6 +937,12 @@ export default function App() {
             onClick={() => setActiveTab("beat")}
           />
           <NavButton
+            icon={<LayoutGrid />}
+            label="التوافق البصري"
+            active={activeTab === "visual_rhythm"}
+            onClick={() => setActiveTab("visual_rhythm")}
+          />
+          <NavButton
             icon={<Database />}
             label="المستودع (كلاسيك)"
             active={activeTab === "repository"}
@@ -1023,6 +1031,20 @@ export default function App() {
                   <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
                     <BeatBlueprintEngine />
                   </div>
+                </div>
+              </motion.div>
+            )}
+
+            {activeTab === "visual_rhythm" && (
+              <motion.div
+                key="visual_rhythm"
+                initial={{ opacity: 0, scale: 0.98 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.98 }}
+                className="w-full h-full max-w-[1800px] mx-auto"
+              >
+                <div className="h-full bg-[#04060e] border border-border-default rounded-3xl overflow-hidden shadow-2xl">
+                  <VRASWorkspace />
                 </div>
               </motion.div>
             )}
