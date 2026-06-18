@@ -141,13 +141,15 @@ export function beatBlueprintToVrasAnalysis(
     Math.max(0, Math.min(1, b.onsets.length / maxOnsets))
   );
 
-  // ── بيانات الشكل الموجي (مشتقة من منحنى الطاقة، 500 نقطة) ──
-  const WAVE_POINTS = 500;
-  const waveformData = Array.from({ length: WAVE_POINTS }, (_, i) => {
-    const t = (i / WAVE_POINTS) * duration;
-    const idx = Math.min(energyMap.length - 1, Math.floor(t));
-    return Math.max(0, Math.min(1, energyMap[idx] ?? 0));
-  });
+  // ── بيانات الشكل الموجي الحقيقي (من عيّنات الصوت) مع احتياطي من الطاقة ──
+  const waveformData =
+    blueprint.waveform?.peaks && blueprint.waveform.peaks.length > 0
+      ? blueprint.waveform.peaks
+      : Array.from({ length: 500 }, (_, i) => {
+          const t = (i / 500) * duration;
+          const idx = Math.min(energyMap.length - 1, Math.floor(t));
+          return Math.max(0, Math.min(1, energyMap[idx] ?? 0));
+        });
 
   // ── الوصف الترددي السائد (بدل المقام/السلّم غير المكتشَفين) ──
   const dominantRangeLabelAr: Record<string, string> = {

@@ -6,6 +6,7 @@ import { useVRASStore } from "../../../store/vrasStore";
 
 export const AudioPlayerPanel: React.FC = () => {
   const audioRef = useRef<HTMLAudioElement>(null);
+  const rafRef = useRef<number>(0);
   const { audioUrl, player, beatAnalysis, actions } = useVRASStore();
 
   // ── مزامنة حالة التشغيل ──
@@ -36,14 +37,13 @@ export const AudioPlayerPanel: React.FC = () => {
     audio.playbackRate = player.playbackRate;
   }, [player.playbackRate]);
 
-  // ── حلقة التكرار ──
+  // ── حلقة تحديث سلسة (60fps) لرأس التشغيل + التكرار ──
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const onTimeUpdate = () => {
-      actions.seekTo(audio.currentTime);
-
+    const tick = () => {
+      // معالجة التكرار
       if (
         player.isLooping &&
         player.loopEnd !== null &&
@@ -51,11 +51,15 @@ export const AudioPlayerPanel: React.FC = () => {
       ) {
         audio.currentTime = player.loopStart ?? 0;
       }
+      actions.seekTo(audio.currentTime);
+      rafRef.current = requestAnimationFrame(tick);
     };
 
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    return () => audio.removeEventListener("timeupdate", onTimeUpdate);
-  }, [player.isLooping, player.loopStart, player.loopEnd, actions]);
+    if (player.isPlaying) {
+      rafRef.current = requestAnimationFrame(tick);
+    }
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [player.isPlaying, player.isLooping, player.loopStart, player.loopEnd, actions]);
 
   // ── الانتقال لوقت محدد ──
   useEffect(() => {

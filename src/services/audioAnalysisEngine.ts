@@ -1,6 +1,12 @@
 // ═══════════════════════════════════════════════════════════════
-//  MAQAM — Core Audio Analysis Engine v3.0
-//  المحرك الأساسي للتحليل الصوتي
+//  MAQAM — Core Audio Analysis Engine v4.0 (Real DSP)
+//  المحرك الأساسي للتحليل الصوتي — تحليل ترددي حقيقي عبر FFT/STFT
+//
+//  v4.0 يستبدل التقطيع الزمني الزائف بتحويل فورييه سريع حقيقي:
+//   • فصل ترددي فعلي للنطاقات (كيك/سنير/هاي-هات)
+//   • كشف الإيقاع عبر التدفق الطيفي (spectral flux)
+//   • كشف BPM عبر الارتباط الذاتي لمظروف الطاقة الإيقاعية
+//   • شكل موجي حقيقي مستخرج من العيّنات الصوتية
 // ═══════════════════════════════════════════════════════════════
 
 import type {
@@ -12,32 +18,30 @@ export type { BeatBlueprint };
 export type CompleteAudioAnalysis = BeatBlueprint;
 
 // ── Constants ────────────────────────────────────────────────
-const FFTSIZE              = 2048;
-const HOPSIZE              = 512;
-const BASSMAXHZ           = 250;
-const MIDMINHZ            = 250;
-const MIDMAXHZ            = 4000;
-const HIGHMINHZ           = 4000;
-const ONSETKICKTHRESHOLD  = 0.65;
-const ONSETSNARETHRESHOLD = 0.45;
-const ONSETHIHATTHRESHOLD = 0.30;
-const MINBPM               = 60;
-const MAXBPM               = 200;
+const ANALYSIS_RATE = 32000;   // معدل عيّنات التحليل (Nyquist 16kHz يغطي الهاي-هات)
+const FFT_SIZE       = 2048;   // دقة ترددية ≈ 15.6Hz/bin
+const HOP_SIZE       = 640;    // مظروف بمعدل 50 إطار/ثانية
+const MIN_BPM        = 60;
+const MAX_BPM        = 200;
+const MIN_ONSET_GAP  = 0.07;   // أدنى فاصل بين الـ onsets (ثانية)
+const WAVE_BUCKETS   = 1400;   // عدد نقاط الشكل الموجي
+
+// نطاقات ترددية حقيقية (Hz) لتصنيف أدوات الإيقاع
+const BANDS = {
+  sub:     [30, 100],     // أساس الكيك
+  bass:    [100, 250],    // جسم الكيك / الباس
+  lowMid:  [250, 800],
+  mid:     [800, 2500],   // جسم السنير / الصوت
+  highMid: [2500, 6000],  // طقطقة السنير / الحضور
+  high:    [6000, 14000], // الهاي-هات / الصنوج
+} as const;
+
+type BandName = keyof typeof BANDS;
 
 // ── Utilities ────────────────────────────────────────────────
 
-function getBinRange(sampleRate: number, fftSize: number, minHz: number, maxHz: number) {
-  const binWidth = sampleRate / fftSize;
-  return {
-    min: Math.floor(minHz / binWidth),
-    max: Math.min(Math.ceil(maxHz / binWidth), fftSize / 2 - 1),
-  };
-}
-
-function computeRMS(data: Float32Array): number {
-  let sum = 0;
-  for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
-  return Math.sqrt(sum / data.length);
+function clamp(val: number, min = 0, max = 1): number {
+  return Math.max(min, Math.min(max, val));
 }
 
 function normalize(arr: number[]): number[] {
@@ -45,8 +49,17 @@ function normalize(arr: number[]): number[] {
   return arr.map(v => v / max);
 }
 
-function clamp(val: number, min = 0, max = 1): number {
-  return Math.max(min, Math.min(max, val));
+function mean(arr: number[] | Float32Array): number {
+  let s = 0;
+  for (let i = 0; i < arr.length; i++) s += arr[i];
+  return arr.length ? s / arr.length : 0;
+}
+
+function std(arr: number[], m: number): number {
+  if (arr.length === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < arr.length; i++) { const d = arr[i] - m; s += d * d; }
+  return Math.sqrt(s / arr.length);
 }
 
 function energyToLevel(score: number): EnergyLevel {
@@ -56,254 +69,428 @@ function energyToLevel(score: number): EnergyLevel {
   return "low";
 }
 
-// ── BPM Detection via Autocorrelation ───────────────────────
+// ── Real Radix-2 Iterative FFT ───────────────────────────────
+// تحويل فورييه سريع في المكان (in-place). re/im طولهما N = قوة لـ 2.
 
-function detectBPM(channelData: Float32Array, sampleRate: number): {
-  bpm: number;
-  stability: number;
-} {
-  const frameSize  = Math.floor(sampleRate * 3); // 3-second window
-  const frame      = channelData.slice(0, Math.min(frameSize, channelData.length));
-  const acLength   = Math.floor(sampleRate * 2);
-  const ac         = new Float32Array(acLength);
+function fft(re: Float32Array, im: Float32Array): void {
+  const n = re.length;
 
-  // Autocorrelation
-  for (let lag = 0; lag < acLength; lag++) {
+  // ترتيب عكس البِتّات (bit reversal)
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const tr = re[i]; re[i] = re[j]; re[j] = tr;
+      const ti = im[i]; im[i] = im[j]; im[j] = ti;
+    }
+  }
+
+  // الفراشات (butterflies)
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (-2 * Math.PI) / len;
+    const wLenRe = Math.cos(ang);
+    const wLenIm = Math.sin(ang);
+    const half = len >> 1;
+    for (let i = 0; i < n; i += len) {
+      let wRe = 1, wIm = 0;
+      for (let k = 0; k < half; k++) {
+        const aRe = re[i + k];
+        const aIm = im[i + k];
+        const bRe = re[i + k + half] * wRe - im[i + k + half] * wIm;
+        const bIm = re[i + k + half] * wIm + im[i + k + half] * wRe;
+        re[i + k] = aRe + bRe;
+        im[i + k] = aIm + bIm;
+        re[i + k + half] = aRe - bRe;
+        im[i + k + half] = aIm - bIm;
+        const nwRe = wRe * wLenRe - wIm * wLenIm;
+        wIm = wRe * wLenIm + wIm * wLenRe;
+        wRe = nwRe;
+      }
+    }
+  }
+}
+
+// نافذة Hann (لتقليل التسرّب الطيفي)
+function makeHannWindow(size: number): Float32Array {
+  const w = new Float32Array(size);
+  for (let i = 0; i < size; i++) {
+    w[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (size - 1)));
+  }
+  return w;
+}
+
+// تحويل حدود النطاق (Hz) إلى مدى bins
+function bandBins(rate: number, fftSize: number, lo: number, hi: number) {
+  const binHz = rate / fftSize;
+  return {
+    min: Math.max(1, Math.floor(lo / binHz)),
+    max: Math.min(fftSize / 2 - 1, Math.ceil(hi / binHz)),
+  };
+}
+
+// ── Decode + Resample to mono analysis buffer ────────────────
+
+async function decodeAndPrepare(file: File): Promise<{
+  origMono: Float32Array;
+  origRate: number;
+  duration: number;
+  analysis: Float32Array;
+}> {
+  const audioContext = new AudioContext();
+  const arrayBuffer = await file.arrayBuffer();
+  const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+  const duration = audioBuffer.duration;
+  const origRate = audioBuffer.sampleRate;
+
+  // مزج لقناة واحدة (mono) للشكل الموجي الأصلي
+  const chCount = audioBuffer.numberOfChannels;
+  const len = audioBuffer.length;
+  const origMono = new Float32Array(len);
+  for (let ch = 0; ch < chCount; ch++) {
+    const data = audioBuffer.getChannelData(ch);
+    for (let i = 0; i < len; i++) origMono[i] += data[i] / chCount;
+  }
+
+  // إعادة أخذ العيّنات إلى ANALYSIS_RATE عبر OfflineAudioContext
+  const targetLen = Math.ceil(duration * ANALYSIS_RATE);
+  const offline = new OfflineAudioContext(1, targetLen, ANALYSIS_RATE);
+  const src = offline.createBufferSource();
+  src.buffer = audioBuffer;
+  src.connect(offline.destination);
+  src.start(0);
+  const rendered = await offline.startRendering();
+  const analysis = rendered.getChannelData(0).slice();
+
+  await audioContext.close();
+  return { origMono, origRate, duration, analysis };
+}
+
+// ── STFT: per-frame band energies + spectral flux ────────────
+
+interface STFTResult {
+  frameTimes:  number[];                       // وقت كل إطار (ثانية)
+  bandEnergy:  Record<BandName, number[]>;      // طاقة كل نطاق لكل إطار
+  bandFlux:    Record<BandName, number[]>;      // تدفق إيجابي لكل نطاق
+  totalFlux:   number[];                        // التدفق الطيفي الكلي
+  rms:         number[];                        // RMS لكل إطار
+  fps:         number;                          // إطارات/ثانية للمظروف
+}
+
+async function computeSTFT(
+  signal: Float32Array,
+  onProgress?: (p: number) => void,
+): Promise<STFTResult> {
+  const window = makeHannWindow(FFT_SIZE);
+  const frameCount = Math.max(1, Math.floor((signal.length - FFT_SIZE) / HOP_SIZE));
+  const fps = ANALYSIS_RATE / HOP_SIZE;
+
+  const bandRanges = Object.fromEntries(
+    (Object.keys(BANDS) as BandName[]).map(name => [
+      name,
+      bandBins(ANALYSIS_RATE, FFT_SIZE, BANDS[name][0], BANDS[name][1]),
+    ])
+  ) as Record<BandName, { min: number; max: number }>;
+
+  const bandEnergy = Object.fromEntries(
+    (Object.keys(BANDS) as BandName[]).map(n => [n, [] as number[]])
+  ) as Record<BandName, number[]>;
+  const bandFlux = Object.fromEntries(
+    (Object.keys(BANDS) as BandName[]).map(n => [n, [] as number[]])
+  ) as Record<BandName, number[]>;
+  const totalFlux: number[] = [];
+  const rms: number[] = [];
+  const frameTimes: number[] = [];
+
+  const re = new Float32Array(FFT_SIZE);
+  const im = new Float32Array(FFT_SIZE);
+  const prevMag = new Float32Array(FFT_SIZE / 2);
+  const prevBand = Object.fromEntries(
+    (Object.keys(BANDS) as BandName[]).map(n => [n, 0])
+  ) as Record<BandName, number>;
+
+  for (let f = 0; f < frameCount; f++) {
+    const start = f * HOP_SIZE;
+
+    // تطبيق النافذة + حساب RMS
+    let sumSq = 0;
+    for (let i = 0; i < FFT_SIZE; i++) {
+      const s = signal[start + i] || 0;
+      sumSq += s * s;
+      re[i] = s * window[i];
+      im[i] = 0;
+    }
+    rms.push(Math.sqrt(sumSq / FFT_SIZE));
+    frameTimes.push(start / ANALYSIS_RATE);
+
+    fft(re, im);
+
+    // مقادير الطيف + تدفق كلي
+    let flux = 0;
+    for (let b = 0; b < FFT_SIZE / 2; b++) {
+      const mag = Math.sqrt(re[b] * re[b] + im[b] * im[b]);
+      const diff = mag - prevMag[b];
+      if (diff > 0) flux += diff;
+      prevMag[b] = mag;
+      // نخزّن المقدار مؤقتًا في re لإعادة استخدامه في طاقة النطاق
+      re[b] = mag;
+    }
+    totalFlux.push(flux);
+
+    // طاقة + تدفق كل نطاق
+    for (const name of Object.keys(BANDS) as BandName[]) {
+      const { min, max } = bandRanges[name];
+      let e = 0;
+      for (let b = min; b <= max; b++) e += re[b]; // re[b] = المقدار الآن
+      e /= (max - min + 1);
+      bandEnergy[name].push(e);
+      const d = e - prevBand[name];
+      bandFlux[name].push(d > 0 ? d : 0);
+      prevBand[name] = e;
+    }
+
+    // إفساح المجال للواجهة + تقرير التقدم كل فترة
+    if (onProgress && (f & 1023) === 0) {
+      onProgress(f / frameCount);
+      await new Promise(r => setTimeout(r, 0));
+    }
+  }
+
+  return { frameTimes, bandEnergy, bandFlux, totalFlux, rms, fps };
+}
+
+// ── BPM via autocorrelation of the onset-strength envelope ───
+
+function detectBPM(stft: STFTResult): { bpm: number; stability: number } {
+  const env = stft.totalFlux;
+  const fps = stft.fps;
+  const n = env.length;
+  if (n < 8) return { bpm: 90, stability: 0 };
+
+  // إزالة المتوسط
+  const m = mean(env);
+  const x = new Float32Array(n);
+  for (let i = 0; i < n; i++) x[i] = Math.max(0, env[i] - m);
+
+  const minLag = Math.floor((60 / MAX_BPM) * fps);
+  const maxLag = Math.min(n - 1, Math.floor((60 / MIN_BPM) * fps));
+
+  // الارتباط الذاتي الخام
+  const ac: number[] = new Array(maxLag * 3 + 2).fill(0);
+  const acMaxLag = Math.min(n - 1, maxLag * 3);
+  for (let lag = minLag; lag <= acMaxLag; lag++) {
     let sum = 0;
-    for (let i = 0; i < frame.length - lag; i++) {
-      sum += frame[i] * frame[i + lag];
-    }
-    ac[lag] = sum / (frame.length - lag);
+    for (let i = 0; i < n - lag; i++) sum += x[i] * x[i + lag];
+    ac[lag] = sum / (n - lag);
   }
 
-  // Find peaks in BPM range
-  const minLag = Math.floor((60 / MAXBPM) * sampleRate);
-  const maxLag = Math.floor((60 / MINBPM) * sampleRate);
-
-  let bestLag     = minLag;
-  let bestAC      = -Infinity;
-  const peaks: number[] = [];
-
+  // الارتباط الذاتي المعزّز بالتوافقيات (يدعم الأساس فوق مضاعفاته)
+  // eac[lag] = ac[lag] + ½·ac[2·lag] + ⅓·ac[3·lag]
+  let bestLag = minLag;
+  let bestVal = -Infinity;
   for (let lag = minLag; lag <= maxLag; lag++) {
-    if (ac[lag] > bestAC) {
-      bestAC  = ac[lag];
-      bestLag = lag;
-    }
-    if (
-      lag > minLag &&
-      lag < maxLag &&
-      ac[lag] > ac[lag - 1] &&
-      ac[lag] > ac[lag + 1] &&
-      ac[lag] > ac[0] / 0.3
-    ) {
-      peaks.push(lag);
-    }
+    const eac = ac[lag] + 0.5 * (ac[2 * lag] || 0) + 0.33 * (ac[3 * lag] || 0);
+    if (eac > bestVal) { bestVal = eac; bestLag = lag; }
   }
 
-  const bpm       = (60 * sampleRate) / bestLag;
-  const stability = clamp(bestAC / (ac[0] || 1));
+  let bpm = (60 * fps) / bestLag;
+  while (bpm < 70) bpm *= 2;
+  while (bpm > 160) bpm /= 2;
+
+  const acAvg = mean(ac.filter(v => v > 0)) || 1;
+  const stability = clamp(ac[bestLag] / (acAvg * 3));
 
   return {
-    bpm:       Math.round(clamp(bpm, MINBPM, MAXBPM) * 10) / 10,
+    bpm: Math.round(bpm * 10) / 10,
     stability: Math.round(stability * 100) / 100,
   };
 }
 
-// ── Onset Detection ──────────────────────────────────────────
+// ── Onset detection + drum classification (real bands) ───────
 
 function detectOnsets(
-  audioBuffer:  AudioBuffer,
-  bpm:          number,
-  sampleRate:   number
+  stft: STFTResult,
+  bpm: number,
 ): OnsetEvent[] {
-  const channelData     = audioBuffer.getChannelData(0);
-  const secondsPerBeat  = 60 / bpm;
-  const secondsPerBar   = secondsPerBeat * 4;
-  const hopSamples      = HOPSIZE;
+  const { totalFlux, bandEnergy, frameTimes, fps } = stft;
+  const n = totalFlux.length;
+  const secondsPerBeat = 60 / bpm;
+  const secondsPerBar = secondsPerBeat * 4;
+
+  // مظروف منعّم + عتبة تكيّفية محلية
+  const win = Math.max(3, Math.floor(fps * 0.1)); // ±100ms
   const onsets: OnsetEvent[] = [];
+  let lastOnset = -Infinity;
 
-  const offlineCtx  = new OfflineAudioContext(1, channelData.length, sampleRate);
-  const analyser    = offlineCtx.createAnalyser();
-  analyser.fftSize  = FFTSIZE;
+  // تطبيع التدفق الكلي
+  const fMax = Math.max(...totalFlux, 1e-9);
+  const flux = totalFlux.map(v => v / fMax);
 
-  // Frame-by-frame energy diff (spectral flux)
-  const frameCount  = Math.floor(channelData.length / hopSamples);
+  for (let i = 1; i < n - 1; i++) {
+    const lo = Math.max(0, i - win);
+    const hi = Math.min(n, i + win);
+    const localSlice = flux.slice(lo, hi);
+    const lm = mean(localSlice);
+    const ls = std(localSlice, lm);
+    const threshold = lm + 1.5 * ls + 0.03;
 
-  let prevBassEnergy = 0;
-  let prevMidEnergy  = 0;
-  let prevHighEnergy = 0;
+    const isPeak = flux[i] > flux[i - 1] && flux[i] >= flux[i + 1];
+    const t = frameTimes[i];
 
-  for (let frame = 0; frame < frameCount; frame++) {
-    const startSample = frame * hopSamples;
-    const endSample   = Math.min(startSample + FFTSIZE, channelData.length);
-    const segment     = channelData.slice(startSample, endSample);
+    if (isPeak && flux[i] > threshold && t - lastOnset >= MIN_ONSET_GAP) {
+      lastOnset = t;
 
-    // Compute energy per band using RMS on segment slices
-    const bassSlice  = segment.slice(0, Math.floor(segment.length * (BASSMAXHZ / (sampleRate / 2))));
-    const midSlice   = segment.slice(
-      Math.floor(segment.length * (MIDMINHZ  / (sampleRate / 2))),
-      Math.floor(segment.length * (MIDMAXHZ  / (sampleRate / 2)))
-    );
-    const highSlice  = segment.slice(Math.floor(segment.length * (HIGHMINHZ / (sampleRate / 2))));
+      // تصنيف الأداة عبر توزيع الطاقة الطيفي الفعلي عند لحظة الضربة
+      const lowE  = bandEnergy.sub[i] + bandEnergy.bass[i];
+      const midE  = bandEnergy.lowMid[i] + bandEnergy.mid[i] + bandEnergy.highMid[i];
+      const highE = bandEnergy.high[i];
+      const tot   = lowE + midE + highE + 1e-9;
+      const lowRatio  = lowE / tot;
+      const highRatio = highE / tot;
 
-    const bassE = computeRMS(bassSlice.length  > 0 ? bassSlice  : segment);
-    const midE  = computeRMS(midSlice.length   > 0 ? midSlice   : segment);
-    const highE = computeRMS(highSlice.length  > 0 ? highSlice  : segment);
+      let type: OnsetEvent["type"];
+      if (lowRatio > 0.42) {
+        type = "kick";                                   // هيمنة الترددات المنخفضة
+      } else if (highRatio > 0.38 && lowRatio < 0.25) {
+        type = "hihat";                                  // ترددات عالية مع باس ضعيف
+      } else {
+        type = "snare";                                  // طيف عريض / متوسط
+      }
 
-    const bassDiff = bassE - prevBassEnergy;
-    const midDiff  = midE  - prevMidEnergy;
-    const highDiff = highE - prevHighEnergy;
+      const barIndex = Math.floor(t / secondsPerBar);
+      const beatInBar = (t % secondsPerBar) / secondsPerBeat;
+      const beatIndex = clamp(Math.floor(beatInBar) + 1, 1, 4);
+      const subdivIndex = clamp(Math.round((beatInBar % 1) * 4), 0, 3);
 
-    const timeSeconds = (startSample / sampleRate);
-    const barIndex    = Math.floor(timeSeconds / secondsPerBar);
-    const beatInBar   = (timeSeconds % secondsPerBar) / secondsPerBeat;
-    const beatIndex   = Math.floor(beatInBar) + 1;
-    const subdivIndex = Math.round((beatInBar % 1) * 4);
-
-    // Classify onset type by spectral content
-    if (bassDiff > ONSETKICKTHRESHOLD * 0.1) {
       onsets.push({
-        timeSeconds,
+        timeSeconds: t,
         barIndex,
-        beatIndex:         clamp(beatIndex, 1, 4) as any,
-        subdivisionIndex:  clamp(subdivIndex, 0, 3),
-        strength:          clamp(bassDiff * 8),
-        type:              "kick",
-      });
-    } else if (midDiff > ONSETSNARETHRESHOLD * 0.05 && midDiff > bassDiff) {
-      onsets.push({
-        timeSeconds,
-        barIndex,
-        beatIndex:         clamp(beatIndex, 1, 4) as any,
-        subdivisionIndex:  clamp(subdivIndex, 0, 3),
-        strength:          clamp(midDiff * 8),
-        type:              "snare",
-      });
-    } else if (highDiff > ONSETHIHATTHRESHOLD * 0.03) {
-      onsets.push({
-        timeSeconds,
-        barIndex,
-        beatIndex:         clamp(beatIndex, 1, 4) as any,
-        subdivisionIndex:  clamp(subdivIndex, 0, 3),
-        strength:          clamp(highDiff * 8),
-        type:              "hihat",
+        beatIndex: beatIndex as any,
+        subdivisionIndex: subdivIndex,
+        strength: clamp(flux[i]),
+        type,
       });
     }
-
-    prevBassEnergy = bassE;
-    prevMidEnergy  = midE;
-    prevHighEnergy = highE;
   }
 
-  // Deduplicate close onsets (within 50ms)
-  return onsets.filter((o, i) =>
-    i === 0 || o.timeSeconds - onsets[i - 1].timeSeconds > 0.05
-  );
+  return onsets;
 }
 
-// ── Spectral Analysis per Bar ────────────────────────────────
+// ── Per-bar spectral aggregation (real band energies) ────────
 
 function analyzeSpectralPerBar(
-  audioBuffer:   AudioBuffer,
-  totalBars:     number,
-  secondsPerBar: number
+  stft: STFTResult,
+  totalBars: number,
+  secondsPerBar: number,
 ): { bassProfile: number[]; midProfile: number[]; highProfile: number[]; energyCurve: number[] } {
-  const channelData  = audioBuffer.getChannelData(0);
-  const sampleRate   = audioBuffer.sampleRate;
-  const bassProfile: number[] = [];
-  const midProfile:  number[] = [];
-  const highProfile: number[] = [];
-  const energyCurve: number[] = [];
+  const bassProfile = new Array(totalBars).fill(0);
+  const midProfile  = new Array(totalBars).fill(0);
+  const highProfile = new Array(totalBars).fill(0);
+  const energyCurve = new Array(totalBars).fill(0);
+  const counts      = new Array(totalBars).fill(0);
 
-  for (let bar = 0; bar < totalBars; bar++) {
-    const startSample = Math.floor(bar * secondsPerBar * sampleRate);
-    const endSample   = Math.min(
-      Math.floor((bar + 1) * secondsPerBar * sampleRate),
-      channelData.length
-    );
+  const { frameTimes, bandEnergy, rms } = stft;
 
-    if (startSample >= channelData.length) break;
+  for (let i = 0; i < frameTimes.length; i++) {
+    const bar = Math.floor(frameTimes[i] / secondsPerBar);
+    if (bar < 0 || bar >= totalBars) continue;
+    bassProfile[bar] += bandEnergy.sub[i] + bandEnergy.bass[i];
+    midProfile[bar]  += bandEnergy.lowMid[i] + bandEnergy.mid[i];
+    highProfile[bar] += bandEnergy.highMid[i] + bandEnergy.high[i];
+    energyCurve[bar] += rms[i];
+    counts[bar]++;
+  }
 
-    const segment = channelData.slice(startSample, endSample);
-    const len     = segment.length;
-
-    // Approximate band energy via position-based sampling
-    const bassEnd  = Math.floor(len * (BASSMAXHZ  / (sampleRate / 2)));
-    const midStart = Math.floor(len * (MIDMINHZ   / (sampleRate / 2)));
-    const midEnd   = Math.floor(len * (MIDMAXHZ   / (sampleRate / 2)));
-    const highStart= Math.floor(len * (HIGHMINHZ  / (sampleRate / 2)));
-
-    const bassE = computeRMS(segment.slice(0, Math.max(bassEnd, 1)));
-    const midE  = computeRMS(segment.slice(
-      Math.max(midStart, 0),
-      Math.max(midEnd, midStart + 1)
-    ));
-    const highE = computeRMS(segment.slice(Math.max(highStart, 0)));
-    const total = computeRMS(segment);
-
-    bassProfile.push(bassE);
-    midProfile.push(midE);
-    highProfile.push(highE);
-    energyCurve.push(total);
+  for (let b = 0; b < totalBars; b++) {
+    const c = Math.max(1, counts[b]);
+    bassProfile[b] /= c;
+    midProfile[b]  /= c;
+    highProfile[b] /= c;
+    energyCurve[b] /= c;
   }
 
   return {
-    bassProfile:  normalize(bassProfile),
-    midProfile:   normalize(midProfile),
-    highProfile:  normalize(highProfile),
-    energyCurve:  normalize(energyCurve),
+    bassProfile: normalize(bassProfile),
+    midProfile:  normalize(midProfile),
+    highProfile: normalize(highProfile),
+    energyCurve: normalize(energyCurve),
   };
+}
+
+// ── Real waveform peaks from original samples ────────────────
+
+function computeWaveform(
+  origMono: Float32Array,
+  buckets: number,
+): { peaks: number[]; rmsCurve: number[] } {
+  const peaks: number[] = [];
+  const rmsCurve: number[] = [];
+  const bucketSize = Math.max(1, Math.floor(origMono.length / buckets));
+
+  for (let b = 0; b < buckets; b++) {
+    const start = b * bucketSize;
+    const end = Math.min(start + bucketSize, origMono.length);
+    let peak = 0;
+    let sumSq = 0;
+    for (let i = start; i < end; i++) {
+      const a = Math.abs(origMono[i]);
+      if (a > peak) peak = a;
+      sumSq += origMono[i] * origMono[i];
+    }
+    peaks.push(peak);
+    rmsCurve.push(Math.sqrt(sumSq / Math.max(1, end - start)));
+    if (start >= origMono.length) break;
+  }
+
+  return { peaks: normalize(peaks), rmsCurve: normalize(rmsCurve) };
 }
 
 // ── Rhyme Slot Generator ─────────────────────────────────────
 
 function generateRhymeSlots(
-  onsets:        OnsetEvent[],
-  barIndex:      number,
+  onsets: OnsetEvent[],
+  barIndex: number,
   secondsPerBar: number,
-  energyScore:   number
+  energyScore: number,
 ): RhymeSlot[] {
   const slots: RhymeSlot[] = [];
-  const secondsPerBeat     = secondsPerBar / 4;
+  const secondsPerBeat = secondsPerBar / 4;
 
-  // Standard rap landing positions: beat 2 & 4 (snare hits)
   const landingBeats = [2, 4];
   landingBeats.forEach(beat => {
-    const time     = barIndex * secondsPerBar + (beat - 1) * secondsPerBeat;
-    const nearSnare= onsets.some(
+    const time = barIndex * secondsPerBar + (beat - 1) * secondsPerBeat;
+    const nearSnare = onsets.some(
       o => o.type === "snare" && Math.abs(o.timeSeconds - time) < 0.08
     );
     slots.push({
       barIndex,
-      beatPosition:          beat,
-      timeSeconds:           time,
-      slotType:              nearSnare ? "landing" : "pocket",
-      confidence:            nearSnare ? 0.92 : 0.65,
+      beatPosition: beat,
+      timeSeconds: time,
+      slotType: nearSnare ? "landing" : "pocket",
+      confidence: nearSnare ? 0.92 : 0.65,
       suggestedSyllableCount: Math.round(4 + energyScore * 4),
     });
   });
 
-  // Breath points: end of bar (beat 4.5 – 4.75)
   slots.push({
     barIndex,
-    beatPosition:          4.5,
-    timeSeconds:           barIndex * secondsPerBar + 3.5 * secondsPerBeat,
-    slotType:              "breath",
-    confidence:            0.75,
+    beatPosition: 4.5,
+    timeSeconds: barIndex * secondsPerBar + 3.5 * secondsPerBeat,
+    slotType: "breath",
+    confidence: 0.75,
     suggestedSyllableCount: 0,
   });
 
-  // Ghost pockets: after each kick
   onsets
     .filter(o => o.type === "kick" && o.beatIndex <= 3)
     .slice(0, 2)
     .forEach(kick => {
       slots.push({
         barIndex,
-        beatPosition:          kick.beatIndex + 0.5,
-        timeSeconds:           kick.timeSeconds + secondsPerBeat * 0.5,
-        slotType:              "ghost",
-        confidence:            0.50,
+        beatPosition: kick.beatIndex + 0.5,
+        timeSeconds: kick.timeSeconds + secondsPerBeat * 0.5,
+        slotType: "ghost",
+        confidence: 0.50,
         suggestedSyllableCount: 2,
       });
     });
@@ -314,37 +501,35 @@ function generateRhymeSlots(
 // ── Bar Builder ──────────────────────────────────────────────
 
 function buildBars(
-  totalBars:     number,
+  totalBars: number,
   secondsPerBar: number,
-  onsets:        OnsetEvent[],
-  spectral:      ReturnType<typeof analyzeSpectralPerBar>
+  onsets: OnsetEvent[],
+  spectral: ReturnType<typeof analyzeSpectralPerBar>,
 ): Bar[] {
+  const avgEnergy = spectral.energyCurve.reduce((a, b) => a + b, 0) / Math.max(1, totalBars);
+
   return Array.from({ length: totalBars }, (_, i) => {
-    const barOnsets    = onsets.filter(o => o.barIndex === i);
-    const energyScore  = spectral.energyCurve[i] ?? 0;
-    const bassE        = spectral.bassProfile[i]  ?? 0;
-    const midE         = spectral.midProfile[i]   ?? 0;
-    const highE        = spectral.highProfile[i]  ?? 0;
+    const barOnsets = onsets.filter(o => o.barIndex === i);
+    const energyScore = spectral.energyCurve[i] ?? 0;
+    const bassE = spectral.bassProfile[i] ?? 0;
+    const midE = spectral.midProfile[i] ?? 0;
+    const highE = spectral.highProfile[i] ?? 0;
 
-    // Silence detection: if energy is very low relative to average
-    const avgEnergy    = spectral.energyCurve.reduce((a, b) => a + b, 0) / totalBars;
-    const hasSilence   = energyScore < avgEnergy * 0.25;
+    const hasSilence = energyScore < avgEnergy * 0.25;
     const silenceRatio = hasSilence ? clamp(1 - energyScore / (avgEnergy * 0.25)) : 0;
-
-    // Rhyme slots: identify pockets after kick/snare hits
-    const rhymeSlots   = generateRhymeSlots(barOnsets, i, secondsPerBar, energyScore);
+    const rhymeSlots = generateRhymeSlots(barOnsets, i, secondsPerBar, energyScore);
 
     return {
-      index:         i,
-      startTime:     i * secondsPerBar,
-      endTime:       (i + 1) * secondsPerBar,
+      index: i,
+      startTime: i * secondsPerBar,
+      endTime: (i + 1) * secondsPerBar,
       durationSeconds: secondsPerBar,
-      onsets:        barOnsets,
-      energyLevel:   energyToLevel(energyScore),
+      onsets: barOnsets,
+      energyLevel: energyToLevel(energyScore),
       energyScore,
-      bassEnergy:    bassE,
-      midEnergy:     midE,
-      highEnergy:    highE,
+      bassEnergy: bassE,
+      midEnergy: midE,
+      highEnergy: highE,
       hasSilence,
       silenceRatio,
       rhymeSlots,
@@ -354,7 +539,7 @@ function buildBars(
 
 // ── Structure Detector ───────────────────────────────────────
 
-const SECTIONCOLORS: Record<SectionType, string> = {
+const SECTION_COLORS: Record<SectionType, string> = {
   intro:   "#6366F1",
   verse:   "#10B981",
   hook:    "#F59E0B",
@@ -369,52 +554,50 @@ function detectStructure(bars: Bar[]): SongSection[] {
 
   const sections: SongSection[] = [];
   let sectionStart = 0;
-  let prevLevel    = bars[0].energyLevel;
+  let prevLevel = bars[0].energyLevel;
 
   const flush = (endBar: number) => {
     if (endBar <= sectionStart) return;
-    const slice     = bars.slice(sectionStart, endBar);
+    const slice = bars.slice(sectionStart, endBar);
     const avgEnergy = slice.reduce((a, b) => a + b.energyScore, 0) / slice.length;
-    const barCount  = endBar - sectionStart;
+    const barCount = endBar - sectionStart;
 
     let type: SectionType;
     const idx = sections.length;
-    if (idx === 0 && barCount <= 4)                     type = "intro";
-    else if (idx === sections.length - 1 && barCount <= 4) type = "outro";
-    else if (avgEnergy >= 0.75)                         type = "chorus";
-    else if (avgEnergy >= 0.55)                         type = "hook";
-    else if (avgEnergy >= 0.25)                         type = "verse";
-    else                                                type = "bridge";
+    if (idx === 0 && barCount <= 4)                        type = "intro";
+    else if (avgEnergy >= 0.75)                            type = "chorus";
+    else if (avgEnergy >= 0.55)                            type = "hook";
+    else if (avgEnergy >= 0.25)                            type = "verse";
+    else                                                   type = "bridge";
 
     const domBass = slice.reduce((a, b) => a + b.bassEnergy, 0) / slice.length;
-    const domMid  = slice.reduce((a, b) => a + b.midEnergy,  0) / slice.length;
+    const domMid  = slice.reduce((a, b) => a + b.midEnergy, 0) / slice.length;
     const domHigh = slice.reduce((a, b) => a + b.highEnergy, 0) / slice.length;
 
     sections.push({
-      id:               `section-${idx}`,
+      id: `section-${idx}`,
       type,
-      label:            `${type.charAt(0).toUpperCase() + type.slice(1)} ${
+      label: `${type.charAt(0).toUpperCase() + type.slice(1)} ${
         sections.filter(s => s.type === type).length + 1
       }`,
-      startBar:         sectionStart,
-      endBar:           endBar - 1,
-      startTime:        bars[sectionStart].startTime,
-      endTime:          bars[endBar - 1].endTime,
+      startBar: sectionStart,
+      endBar: endBar - 1,
+      startTime: bars[sectionStart].startTime,
+      endTime: bars[endBar - 1].endTime,
       barCount,
-      averageEnergy:    avgEnergy,
+      averageEnergy: avgEnergy,
       dominantFrequency: domBass > domMid && domBass > domHigh ? "bass"
-                       : domMid  > domHigh                     ? "mid"  : "high",
-      colorHex:         SECTIONCOLORS[type],
+                       : domMid > domHigh                      ? "mid" : "high",
+      colorHex: SECTION_COLORS[type],
     });
     sectionStart = endBar;
   };
 
-  // Segment on energy transitions (every 4–8 bars)
   for (let i = 1; i < bars.length; i++) {
     const barsSinceStart = i - sectionStart;
-    const energyJump     = Math.abs(bars[i].energyScore - bars[i - 1].energyScore) > 0.30;
-    const levelChange    = bars[i].energyLevel !== prevLevel;
-    const naturalBoundary= barsSinceStart >= 4 && barsSinceStart % 4 === 0;
+    const energyJump = Math.abs(bars[i].energyScore - bars[i - 1].energyScore) > 0.30;
+    const levelChange = bars[i].energyLevel !== prevLevel;
+    const naturalBoundary = barsSinceStart >= 4 && barsSinceStart % 4 === 0;
 
     if ((energyJump && barsSinceStart >= 2) || (levelChange && naturalBoundary)) {
       flush(i);
@@ -425,80 +608,89 @@ function detectStructure(bars: Bar[]): SongSection[] {
   }
   flush(bars.length);
 
+  // إعادة تصنيف القسم الأخير كـ outro إن كان قصيرًا ومنخفض الطاقة
+  if (sections.length > 1) {
+    const last = sections[sections.length - 1];
+    if (last.barCount <= 4 && last.averageEnergy < 0.4) {
+      last.type = "outro";
+      last.colorHex = SECTION_COLORS.outro;
+      last.label = "Outro 1";
+    }
+  }
+
   return sections;
 }
 
 // ── Main Exported Function ───────────────────────────────────
 
 export async function analyzeAudioFile(
-  file:           File,
-  onProgress?:    (progress: number, stage: string) => void
+  file: File,
+  onProgress?: (progress: number, stage: string) => void,
 ): Promise<BeatBlueprint> {
 
   const report = (p: number, s: string) => onProgress?.(p, s);
 
   report(5, "فك تشفير الملف الصوتي...");
-  const audioContext  = new AudioContext();
-  const arrayBuffer   = await file.arrayBuffer();
+  const { origMono, duration, analysis } = await decodeAndPrepare(file);
 
-  report(20, "تحليل البنية الطيفية...");
-  const audioBuffer   = await audioContext.decodeAudioData(arrayBuffer);
-  const channelData   = audioBuffer.getChannelData(0);
-  const sampleRate    = audioBuffer.sampleRate;
-  const duration      = audioBuffer.duration;
+  report(15, "تحليل الطيف الترددي (FFT)...");
+  const stft = await computeSTFT(analysis, (p) => {
+    report(15 + Math.round(p * 45), "تحليل الطيف الترددي (FFT)...");
+  });
 
-  report(35, "كشف السرعة الإيقاعية BPM...");
-  const { bpm, stability } = detectBPM(channelData, sampleRate);
-  const secondsPerBeat     = 60 / bpm;
-  const secondsPerBar      = secondsPerBeat * 4;
-  const totalBars          = Math.floor(duration / secondsPerBar);
-  const gridResolution     = Math.round(secondsPerBeat * 250); // ms per 16th
+  report(62, "كشف السرعة الإيقاعية BPM...");
+  const { bpm, stability } = detectBPM(stft);
+  const secondsPerBeat = 60 / bpm;
+  const secondsPerBar = secondsPerBeat * 4;
+  const totalBars = Math.max(1, Math.floor(duration / secondsPerBar));
+  const gridResolution = Math.round(secondsPerBeat * 250);
 
-  report(50, "رصد مواضع الكيك والسنير...");
-  const onsets = detectOnsets(audioBuffer, bpm, sampleRate);
+  report(70, "رصد مواضع الكيك والسنير...");
+  const onsets = detectOnsets(stft, bpm);
 
-  report(65, "تحليل الطيف الترددي لكل بار...");
-  const spectral  = analyzeSpectralPerBar(audioBuffer, totalBars, secondsPerBar);
+  report(78, "تحليل الطيف الترددي لكل بار...");
+  const spectral = analyzeSpectralPerBar(stft, totalBars, secondsPerBar);
 
-  report(75, "بناء خريطة البارات...");
-  const bars      = buildBars(totalBars, secondsPerBar, onsets, spectral);
+  report(84, "بناء خريطة البارات...");
+  const bars = buildBars(totalBars, secondsPerBar, onsets, spectral);
 
-  report(85, "كشف أقسام البيت...");
-  const sections  = detectStructure(bars);
+  report(89, "كشف أقسام البيت...");
+  const sections = detectStructure(bars);
 
-  report(93, "هندسة جيوب القافية...");
-  const allSlots  = bars.flatMap(b => b.rhymeSlots);
+  report(93, "استخراج الشكل الموجي...");
+  const waveform = computeWaveform(origMono, WAVE_BUCKETS);
+
+  report(96, "هندسة جيوب القافية...");
+  const allSlots = bars.flatMap(b => b.rhymeSlots);
 
   const dominantRange = (() => {
     const avgBass = spectral.bassProfile.reduce((a, b) => a + b, 0) / totalBars;
-    const avgMid  = spectral.midProfile.reduce( (a, b) => a + b, 0) / totalBars;
+    const avgMid  = spectral.midProfile.reduce((a, b) => a + b, 0) / totalBars;
     const avgHigh = spectral.highProfile.reduce((a, b) => a + b, 0) / totalBars;
     if (avgBass > avgMid && avgBass > avgHigh) return "bass-heavy";
-    if (avgMid  > avgHigh)                     return "mid-focused";
-    if (avgHigh > avgBass * 1.5)               return "high-sharp";
+    if (avgMid > avgHigh)                       return "mid-focused";
+    if (avgHigh > avgBass * 1.5)                return "high-sharp";
     return "balanced";
   })();
 
-  // Recommended flow style based on BPM & swing
   const recommendedFlow = bpm >= 140 ? "syncopated"
                         : bpm >= 110 ? "off-beat"
                         : bpm >= 85  ? "on-beat"
                         : "triplet";
 
   report(100, "اكتمل التحليل.");
-  await audioContext.close();
 
   return {
     metadata: {
-      filename:       file.name,
+      filename: file.name,
       durationSeconds: duration,
       totalBars,
-      analyzedAt:     Date.now(),
+      analyzedAt: Date.now(),
     },
     tempo: {
       bpm,
-      bpmStability:    stability,
-      timeSignature:   "4/4",
+      bpmStability: stability,
+      timeSignature: "4/4",
       secondsPerBar,
       secondsPerBeat,
       gridResolution,
@@ -509,23 +701,24 @@ export async function analyzeAudioFile(
     },
     rhythm: {
       bars,
-      kickPositions:  onsets.filter(o => o.type === "kick"),
+      kickPositions: onsets.filter(o => o.type === "kick"),
       snarePositions: onsets.filter(o => o.type === "snare"),
       hihatPositions: onsets.filter(o => o.type === "hihat"),
-      swingFactor:    clamp(1 - stability),
+      swingFactor: clamp(1 - stability),
     },
     structure: {
       sections,
-      totalSections:  sections.length,
-      hasIntro:       sections.some(s => s.type === "intro"),
-      hasOutro:       sections.some(s => s.type === "outro"),
+      totalSections: sections.length,
+      hasIntro: sections.some(s => s.type === "intro"),
+      hasOutro: sections.some(s => s.type === "outro"),
     },
     rhymeArchitecture: {
       allSlots,
       primaryLanding: allSlots.filter(s => s.slotType === "landing" && s.confidence > 0.8),
-      breathPoints:   allSlots.filter(s => s.slotType === "breath"),
-      pocketZones:    allSlots.filter(s => s.slotType === "pocket"),
+      breathPoints: allSlots.filter(s => s.slotType === "breath"),
+      pocketZones: allSlots.filter(s => s.slotType === "pocket"),
       recommendedFlow,
     },
+    waveform,
   };
 }

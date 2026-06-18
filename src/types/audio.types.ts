@@ -97,6 +97,10 @@ export interface BeatBlueprint {
     pocketZones:      RhymeSlot[];
     recommendedFlow:  "on-beat" | "off-beat" | "syncopated" | "triplet";
   };
+  waveform?: {
+    peaks:    number[];   // normalized 0–1 peak amplitude per bucket (real samples)
+    rmsCurve: number[];   // normalized 0–1 RMS per bucket
+  };
 }
 
 export interface AnalysisState {
