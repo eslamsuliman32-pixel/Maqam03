@@ -64,6 +64,8 @@ import { RuntimeMonitor } from "./components/RuntimeMonitor";
 import MaqamWorkshopPage from "./pages/MaqamWorkshopPage";
 import { VRASWorkspace } from "./components/melodicFlow/vras/VRASWorkspace";
 import { BarRepositoryDisplay } from "./components/BarRepositoryDisplay";
+import { ObservatoryShell } from "./observatory";
+import type { TableFilters } from "./observatory";
 import MaqamEngine from "./MaqamEngine";
 import { FlowMethodologyHub } from "./components/FlowMethodologyHub";
 import { SonicFingerprintPanel } from "./components/sonic/SonicFingerprintPanel";
@@ -1055,41 +1057,60 @@ export default function App() {
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -20 }}
-                className="w-full h-full flex flex-col gap-6 max-w-[1440px] mx-auto"
+                className="w-full h-full flex flex-col gap-4 max-w-[1440px] mx-auto"
               >
-                <BarRepositoryDisplay
-                  bars={bars}
-                  selectedBars={selectedBars}
-                  viewMode={viewMode}
-                  setViewMode={setViewMode}
-                  groupMode={groupMode}
-                  setGroupMode={setGroupMode}
-                  sortBy={sortBy}
-                  setSortBy={setSortBy}
-                  emotionFilter={emotionFilter}
-                  setEmotionFilter={setEmotionFilter}
-                  footFilter={footFilter}
-                  setFootFilter={setFootFilter}
-                  rhymeFilter={rhymeFilter}
-                  setRhymeFilter={setRhymeFilter}
-                  searchQuery={searchQuery}
-                  setSearchQuery={setSearchQuery}
-                  isCategorizing={isCategorizing}
-                  handleSmartCategorize={handleSmartCategorize}
-                  isUpdatingEmotions={isUpdatingEmotions}
-                  handleUpdateEmotions={handleUpdateEmotions}
-                  isRefreshingRepo={isRefreshingRepo}
-                  handleRefreshRepository={handleRefreshRepository}
-                  setIsBatchImportOpen={setIsBatchImportOpen}
-                  stressFilter={stressFilter}
-                  handleStressFilterChange={handleStressFilterChange}
-                  handleFindSimilar={handleFindSimilar}
-                  handleDeleteRequest={handleDeleteRequest}
-                  setActiveTab={setActiveTab}
-                  toggleFavorite={toggleFavorite}
-                  toggleSelection={toggleSelection}
-                  clearSelection={clearSelection}
-                />
+                {(() => {
+                  const obsFilters: TableFilters = {
+                    searchQuery,
+                    emotionFilter,
+                    footFilter,
+                    rhymeFilter,
+                    stressFilter,
+                    sortBy: (["newest","oldest","moraCount","sonicWeight","serialNumber"].includes(sortBy)
+                      ? sortBy : "newest") as TableFilters["sortBy"],
+                    groupMode: (["none","ai","rhyme","family","sonic"].includes(groupMode as string)
+                      ? groupMode : "none") as TableFilters["groupMode"],
+                  };
+                  return (
+                    <ObservatoryShell
+                      bars={bars}
+                      filters={obsFilters}
+                      repositoryProps={{
+                        selectedBars,
+                        viewMode: viewMode as "grid" | "table",
+                        setViewMode: setViewMode as (m: "grid" | "table") => void,
+                        groupMode: (["none","ai","rhyme","family"].includes(groupMode as string)
+                          ? groupMode : "none") as "none" | "ai" | "rhyme" | "family",
+                        setGroupMode: setGroupMode as any,
+                        sortBy,
+                        setSortBy,
+                        emotionFilter,
+                        setEmotionFilter,
+                        footFilter,
+                        setFootFilter,
+                        rhymeFilter,
+                        setRhymeFilter,
+                        searchQuery,
+                        setSearchQuery,
+                        isCategorizing,
+                        handleSmartCategorize,
+                        isUpdatingEmotions,
+                        handleUpdateEmotions,
+                        isRefreshingRepo,
+                        handleRefreshRepository,
+                        setIsBatchImportOpen,
+                        stressFilter,
+                        handleStressFilterChange,
+                        handleFindSimilar,
+                        handleDeleteRequest,
+                        setActiveTab,
+                        toggleFavorite,
+                        toggleSelection,
+                        clearSelection,
+                      }}
+                    />
+                  );
+                })()}
               </motion.div>
             )}
 
