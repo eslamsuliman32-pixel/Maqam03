@@ -1,8 +1,10 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { useVRASStore } from "../../../store/vrasStore";
+import { useRepositoryStore } from "../../../store/repositoryStore";
+import { repositoryBarsToTextBars } from "../../../services/vrasBarConverter";
 import { AudioUploadZone } from "./AudioUploadZone";
 import { BeatVisualizer } from "./BeatVisualizer";
 import { SectionGrid } from "./SectionGrid";
@@ -14,6 +16,19 @@ import { SessionStatsBar } from "./SessionStatsBar";
 export const VRASWorkspace: React.FC = () => {
   const { phase, isAnalyzing, analysisProgress, beatAnalysis, sessionStats, actions } =
     useVRASStore();
+
+  // ── مزامنة المستودع الرئيسي مع قاعدة بيانات VRAS ──
+  const repoBars = useRepositoryStore((s) => s.bars);
+  const lastCountRef = useRef<number>(-1);
+
+  useEffect(() => {
+    if (repoBars.length === lastCountRef.current) return;
+    lastCountRef.current = repoBars.length;
+    const converted = repositoryBarsToTextBars(repoBars);
+    if (converted.length > 0) {
+      actions.loadBarDatabase(converted);
+    }
+  }, [repoBars, actions]);
 
   return (
     <div
